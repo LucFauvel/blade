@@ -61,24 +61,6 @@ unsafe fn inspect_adapter(
     driver_api_version: u32,
     surface: Option<vk::SurfaceKHR>,
 ) -> Option<AdapterCapabilities> {
-    let supported_extension_properties = instance
-        .core
-        .enumerate_device_extension_properties(phd)
-        .unwrap();
-    let supported_extensions = supported_extension_properties
-        .iter()
-        .map(|ext_prop| ffi::CStr::from_ptr(ext_prop.extension_name.as_ptr()))
-        .collect::<Vec<_>>();
-    for extension in REQUIRED_DEVICE_EXTENSIONS {
-        if !supported_extensions.contains(extension) {
-            log::warn!(
-                "Rejected for device extension {:?} not supported",
-                extension
-            );
-            return None;
-        }
-    }
-
     let mut inline_uniform_block_properties =
         vk::PhysicalDeviceInlineUniformBlockPropertiesEXT::default();
     let mut timeline_semaphore_properties =
@@ -102,25 +84,44 @@ unsafe fn inspect_adapter(
         .get_physical_device_properties2
         .get_physical_device_properties2(phd, &mut properties2_khr);
 
-    let api_version = properties2_khr
-        .properties
-        .api_version
-        .min(driver_api_version);
+    let properties = properties2_khr.properties;
+    let name = ffi::CStr::from_ptr(properties.device_name.as_ptr());
+    log::info!("Adapter: {:?}", name);
+
+    let api_version = properties.api_version.min(driver_api_version);
     if api_version < vk::API_VERSION_1_1 {
         log::warn!("\tRejected for API version {}", api_version);
         return None;
     }
 
-    let vendor_id = properties2_khr.properties.vendor_id;
+    let supported_extension_properties = instance
+        .core
+        .enumerate_device_extension_properties(phd)
+        .unwrap();
+    let supported_extensions = supported_extension_properties
+        .iter()
+        .map(|ext_prop| ffi::CStr::from_ptr(ext_prop.extension_name.as_ptr()))
+        .collect::<Vec<_>>();
+    for extension in REQUIRED_DEVICE_EXTENSIONS {
+        if !supported_extensions.contains(extension) {
+            log::warn!(
+                "Rejected for device extension {:?} not supported. Please update the driver!",
+                extension
+            );
+            return None;
+        }
+    }
 
     let bugs = SystemBugs {
         //Note: this is somewhat broad across X11/Wayland and different drivers.
         // It could be narrower, but at the end of the day if the user forced Prime
         // for GLX it should be safe to assume they want it for Vulkan as well.
-        intel_unable_to_present: is_nvidia_prime_forced() && vendor_id == db::intel::VENDOR,
-        intel_fix_descriptor_pool_leak: cfg!(windows) && vendor_id == db::intel::VENDOR,
+        intel_unable_to_present: is_nvidia_prime_forced()
+            && properties.vendor_id == db::intel::VENDOR,
+        intel_fix_descriptor_pool_leak: cfg!(windows) && properties.vendor_id == db::intel::VENDOR,
     };
 
+    let mut full_screen_exclusive = false;
     let queue_family_index = 0; //TODO
     if let Some(surface) = surface {
         let khr = instance.surface.as_ref()?;
@@ -128,6 +129,20 @@ unsafe fn inspect_adapter(
             log::warn!("Rejected for not presenting to the window surface");
             return None;
         }
+
+        let surface_info = vk::PhysicalDeviceSurfaceInfo2KHR {
+            surface,
+            ..Default::default()
+        };
+        let mut fullscreen_exclusive_ext = vk::SurfaceCapabilitiesFullScreenExclusiveEXT::default();
+        let mut capabilities2_khr =
+            vk::SurfaceCapabilities2KHR::default().push_next(&mut fullscreen_exclusive_ext);
+        let _ = instance
+            .get_surface_capabilities2
+            .get_physical_device_surface_capabilities2(phd, &surface_info, &mut capabilities2_khr);
+        log::debug!("{:?}", capabilities2_khr.surface_capabilities);
+        full_screen_exclusive = fullscreen_exclusive_ext.full_screen_exclusive_supported != 0;
+
         if bugs.intel_unable_to_present {
             log::warn!("Rejecting Intel for not presenting when Nvidia is present (on Linux)");
             return None;
@@ -156,14 +171,6 @@ unsafe fn inspect_adapter(
     instance
         .get_physical_device_properties2
         .get_physical_device_features2(phd, &mut features2_khr);
-
-    instance
-        .get_physical_device_properties2
-        .get_physical_device_properties2(phd, &mut properties2_khr);
-
-    let properties = properties2_khr.properties;
-    let name = ffi::CStr::from_ptr(properties.device_name.as_ptr());
-    log::info!("Adapter {:?}", name);
 
     if inline_uniform_block_properties.max_inline_uniform_block_size
         < crate::limits::PLAIN_DATA_SIZE
@@ -238,7 +245,6 @@ unsafe fn inspect_adapter(
 
     let buffer_marker = supported_extensions.contains(&vk::AMD_BUFFER_MARKER_NAME);
     let shader_info = supported_extensions.contains(&vk::AMD_SHADER_INFO_NAME);
-    let full_screen_exclusive = supported_extensions.contains(&vk::EXT_FULL_SCREEN_EXCLUSIVE_NAME);
 
     let device_information = crate::DeviceInformation {
         is_software_emulated: properties.device_type == vk::PhysicalDeviceType::CPU,
@@ -339,6 +345,7 @@ impl super::Context {
             let mut instance_extensions = vec![
                 vk::EXT_DEBUG_UTILS_NAME,
                 vk::KHR_GET_PHYSICAL_DEVICE_PROPERTIES2_NAME,
+                vk::KHR_GET_SURFACE_CAPABILITIES2_NAME,
             ];
             if let Some((_, dh)) = surface_handles {
                 match ash_window::enumerate_required_extensions(dh.as_raw()) {
@@ -399,6 +406,10 @@ impl super::Context {
                 _debug_utils: ext::debug_utils::Instance::new(&entry, &core_instance),
                 get_physical_device_properties2:
                     khr::get_physical_device_properties2::Instance::new(&entry, &core_instance),
+                get_surface_capabilities2: khr::get_surface_capabilities2::Instance::new(
+                    &entry,
+                    &core_instance,
+                ),
                 surface: if surface_handles.is_some() {
                     Some(khr::surface::Instance::new(&entry, &core_instance))
                 } else {
@@ -513,7 +524,7 @@ impl super::Context {
             instance
                 .core
                 .create_device(physical_device, &device_create_info, None)
-                .unwrap()
+                .map_err(|e| NotSupportedError::VulkanError(e))?
         };
 
         let device = super::Device {
@@ -558,7 +569,11 @@ impl super::Context {
                 extra_sync_src_access: vk::AccessFlags::TRANSFER_WRITE,
                 extra_sync_dst_access: vk::AccessFlags::TRANSFER_WRITE
                     | vk::AccessFlags::TRANSFER_READ
-                    | vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR,
+                    | if capabilities.ray_tracing {
+                        vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR
+                    } else {
+                        vk::AccessFlags::NONE
+                    },
                 extra_descriptor_pool_create_flags: if capabilities
                     .bugs
                     .intel_fix_descriptor_pool_leak
@@ -608,10 +623,25 @@ impl super::Context {
                 | vk::MemoryPropertyFlags::HOST_CACHED
                 | vk::MemoryPropertyFlags::LAZILY_ALLOCATED;
             let valid_ash_memory_types = memory_types.iter().enumerate().fold(0, |u, (i, mem)| {
-                if known_memory_flags.contains(mem.property_flags) {
-                    u | (1 << i)
-                } else {
+                if !known_memory_flags.contains(mem.property_flags) {
+                    log::debug!(
+                        "Skipping memory type={} for having unknown flags: {:?}",
+                        i,
+                        mem.property_flags & !known_memory_flags
+                    );
                     u
+                } else if mem
+                    .property_flags
+                    .contains(vk::MemoryPropertyFlags::HOST_VISIBLE)
+                    && !mem
+                        .property_flags
+                        .contains(vk::MemoryPropertyFlags::HOST_COHERENT)
+                {
+                    //TODO: see if and how we can support this
+                    log::debug!("Skipping memory type={} for lack of host coherency", i);
+                    u
+                } else {
+                    u | (1 << i)
                 }
             });
             super::MemoryManager {
@@ -665,9 +695,15 @@ impl super::Context {
         });
 
         let mut naga_flags = spv::WriterFlags::FORCE_POINT_SIZE;
-        if desc.validation {
+        let shader_debug_path = if desc.validation || desc.capture {
+            use std::{env, fs};
             naga_flags |= spv::WriterFlags::DEBUG;
-        }
+            let dir = env::temp_dir().join("blade");
+            let _ = fs::create_dir(&dir);
+            Some(dir)
+        } else {
+            None
+        };
 
         Ok(super::Context {
             memory: Mutex::new(memory_manager),
@@ -682,6 +718,7 @@ impl super::Context {
             surface,
             physical_device,
             naga_flags,
+            shader_debug_path,
             instance,
             _entry: entry,
         })
@@ -898,17 +935,8 @@ impl super::Context {
                 .unwrap()
         };
 
-        // destroy the old swapchain
         unsafe {
-            surface.extension.destroy_swapchain(surface.swapchain, None);
-        }
-        for frame in surface.frames.drain(..) {
-            unsafe {
-                self.device.core.destroy_image_view(frame.view, None);
-                self.device
-                    .core
-                    .destroy_semaphore(frame.acquire_semaphore, None);
-            }
+            surface.deinit_swapchain(&self.device.core);
         }
 
         let images = unsafe {
@@ -986,6 +1014,46 @@ impl super::Context {
                 }
             }
             Err(other) => panic!("Aquire image error {}", other),
+        }
+    }
+}
+
+impl super::Surface {
+    unsafe fn deinit_swapchain(&mut self, ash_device: &ash::Device) {
+        self.extension.destroy_swapchain(self.swapchain, None);
+        for frame in self.frames.drain(..) {
+            ash_device.destroy_image_view(frame.view, None);
+            ash_device.destroy_semaphore(frame.acquire_semaphore, None);
+        }
+    }
+}
+
+impl Drop for super::Context {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        unsafe {
+            if let Some(surface_mutex) = self.surface.take() {
+                let mut surface = surface_mutex.into_inner().unwrap();
+                surface.deinit_swapchain(&self.device.core);
+                self.device
+                    .core
+                    .destroy_semaphore(surface.next_semaphore, None);
+                if let Some(surface_instance) = self.instance.surface.take() {
+                    surface_instance.destroy_surface(surface.raw, None);
+                }
+            }
+            if let Ok(queue) = self.queue.lock() {
+                self.device
+                    .core
+                    .destroy_semaphore(queue.timeline_semaphore, None);
+                self.device
+                    .core
+                    .destroy_semaphore(queue.present_semaphore, None);
+            }
+            self.device.core.destroy_device(None);
+            self.instance.core.destroy_instance(None);
         }
     }
 }

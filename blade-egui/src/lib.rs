@@ -18,7 +18,8 @@ const SHADER_SOURCE: &'static str = include_str!("../shader.wgsl");
 use blade_util::{BufferBelt, BufferBeltDescriptor};
 use std::{
     collections::hash_map::{Entry, HashMap},
-    mem, ptr,
+    mem::size_of,
+    ptr,
 };
 
 #[repr(C)]
@@ -108,8 +109,15 @@ pub struct GuiPainter {
 impl GuiPainter {
     /// Destroy the contents of the painter.
     pub fn destroy(&mut self, context: &blade_graphics::Context) {
+        context.destroy_render_pipeline(&mut self.pipeline);
         self.belt.destroy(context);
         for (_, gui_texture) in self.textures.drain() {
+            gui_texture.delete(context);
+        }
+        for gui_texture in self.textures_dropped.drain(..) {
+            gui_texture.delete(context);
+        }
+        for (gui_texture, _) in self.textures_to_delete.drain(..) {
             gui_texture.delete(context);
         }
         context.destroy_sampler(self.sampler);
@@ -202,7 +210,7 @@ impl GuiPainter {
                 egui::ImageData::Font(ref a) => {
                     let color_iter = a.srgba_pixels(None);
                     let stage = self.belt.alloc(
-                        (color_iter.len() * mem::size_of::<egui::Color32>()) as u64,
+                        (color_iter.len() * size_of::<egui::Color32>()) as u64,
                         context,
                     );
                     let mut ptr = stage.data() as *mut egui::Color32;

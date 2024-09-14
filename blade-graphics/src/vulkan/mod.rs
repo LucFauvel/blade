@@ -1,5 +1,5 @@
 use ash::{khr, vk};
-use std::{num::NonZeroU32, ptr, sync::Mutex};
+use std::{num::NonZeroU32, path::PathBuf, ptr, sync::Mutex};
 
 mod command;
 mod descriptor;
@@ -11,6 +11,7 @@ struct Instance {
     core: ash::Instance,
     _debug_utils: ash::ext::debug_utils::Instance,
     get_physical_device_properties2: khr::get_physical_device_properties2::Instance,
+    get_surface_capabilities2: khr::get_surface_capabilities2::Instance,
     surface: Option<khr::surface::Instance>,
 }
 
@@ -106,6 +107,7 @@ pub struct Context {
     surface: Option<Mutex<Surface>>,
     physical_device: vk::PhysicalDevice,
     naga_flags: naga::back::spv::WriterFlags,
+    shader_debug_path: Option<PathBuf>,
     instance: Instance,
     _entry: ash::Entry,
 }

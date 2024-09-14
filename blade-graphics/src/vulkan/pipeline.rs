@@ -55,7 +55,7 @@ impl super::Context {
     fn load_shader(
         &self,
         sf: crate::ShaderFunction,
-        naga_options: &spv::Options,
+        naga_options_base: &spv::Options,
         group_layouts: &[&crate::ShaderDataLayout],
         group_infos: &mut [crate::ShaderDataInfo],
         vertex_fetch_states: &[crate::VertexFetchState],
@@ -78,6 +78,28 @@ impl super::Context {
         let pipeline_options = spv::PipelineOptions {
             shader_stage: ep.stage,
             entry_point: sf.entry_point.to_string(),
+        };
+        let file_path;
+        let mut naga_options_debug;
+        let naga_options = if let Some(ref temp_dir) = self.shader_debug_path {
+            use std::{
+                fs,
+                hash::{DefaultHasher, Hash as _, Hasher as _},
+            };
+            let mut hasher = DefaultHasher::new();
+            sf.shader.source.hash(&mut hasher);
+            file_path = temp_dir.join(format!("{}-{:x}.wgsl", sf.entry_point, hasher.finish()));
+            log::debug!("Dumping processed shader code to: {}", file_path.display());
+            let _ = fs::write(&file_path, &sf.shader.source);
+
+            naga_options_debug = naga_options_base.clone();
+            naga_options_debug.debug_info = Some(naga::back::spv::DebugInfo {
+                source_code: &sf.shader.source,
+                file_name: &file_path,
+            });
+            &naga_options_debug
+        } else {
+            naga_options_base
         };
 
         let spv = spv::write_vec(
@@ -284,10 +306,29 @@ impl super::Context {
         }
     }
 
-    pub fn create_compute_pipeline(
-        &self,
-        desc: crate::ComputePipelineDesc,
-    ) -> super::ComputePipeline {
+    fn destroy_pipeline_layout(&self, layout: &mut super::PipelineLayout) {
+        unsafe {
+            self.device.core.destroy_pipeline_layout(layout.raw, None);
+        }
+        for dsl in layout.descriptor_set_layouts.drain(..) {
+            unsafe {
+                self.device
+                    .core
+                    .destroy_descriptor_set_layout(dsl.raw, None);
+                self.device
+                    .core
+                    .destroy_descriptor_update_template(dsl.update_template, None);
+            }
+        }
+    }
+}
+
+#[hidden_trait::expose]
+impl crate::traits::ShaderDevice for super::Context {
+    type ComputePipeline = super::ComputePipeline;
+    type RenderPipeline = super::RenderPipeline;
+
+    fn create_compute_pipeline(&self, desc: crate::ComputePipelineDesc) -> super::ComputePipeline {
         let mut group_infos = desc
             .data_layouts
             .iter()
@@ -343,7 +384,14 @@ impl super::Context {
         }
     }
 
-    pub fn create_render_pipeline(&self, desc: crate::RenderPipelineDesc) -> super::RenderPipeline {
+    fn destroy_compute_pipeline(&self, pipeline: &mut super::ComputePipeline) {
+        self.destroy_pipeline_layout(&mut pipeline.layout);
+        unsafe {
+            self.device.core.destroy_pipeline(pipeline.raw, None);
+        }
+    }
+
+    fn create_render_pipeline(&self, desc: crate::RenderPipelineDesc) -> super::RenderPipeline {
         let mut group_infos = desc
             .data_layouts
             .iter()
@@ -528,6 +576,13 @@ impl super::Context {
             self.set_object_name(raw, desc.name);
         }
         super::RenderPipeline { raw, layout }
+    }
+
+    fn destroy_render_pipeline(&self, pipeline: &mut super::RenderPipeline) {
+        self.destroy_pipeline_layout(&mut pipeline.layout);
+        unsafe {
+            self.device.core.destroy_pipeline(pipeline.raw, None);
+        }
     }
 }
 

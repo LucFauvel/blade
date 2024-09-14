@@ -1,6 +1,13 @@
 Changelog for Blade
 
-## blade-graphics-0.5, blade-macros-0.3, blade-egui-0.4, blade-util-0.1 (TBD)
+## blade-graphics-0.6 (TBD)
+
+- graphics:
+  - API for destruction of pipelines
+  - Metal:
+    - support for workgroup memory
+
+## blade-graphics-0.5, blade-macros-0.3, blade-egui-0.4, blade-util-0.1 (27 Aug 2024)
 
 - crate: `blade-util` for helper utilities
 - graphics:
@@ -10,9 +17,12 @@ Changelog for Blade
     - option to disable exclusive fullscreen
     - VK: using linear sRGB color space if available
   - exposed initialization errors
+  - exposed device information
   - Vk:
     - fixed initial RAM consumption
     - worked around Intel descriptor memory allocation bug
+    - fixed coherent memory requirements
+    - rudimentary cleanup on destruction
   - GLES:
     - support for storage buffer and compute
     - scissor rects, able to run "particle" example

@@ -10,7 +10,7 @@ pub use env_map::EnvironmentMap;
 
 use std::{collections::HashMap, mem, num::NonZeroU32, path::Path, ptr};
 
-const MAX_RESOURCES: u32 = 1000;
+const MAX_RESOURCES: u32 = 8192;
 const RADIANCE_FORMAT: blade_graphics::TextureFormat = blade_graphics::TextureFormat::Rgba16Float;
 
 fn mat4_transform(t: &blade_graphics::Transform) -> glam::Mat4 {
@@ -741,6 +741,12 @@ impl Renderer {
         // samplers
         gpu.destroy_sampler(self.samplers.nearest);
         gpu.destroy_sampler(self.samplers.linear);
+        // pipelines
+        gpu.destroy_compute_pipeline(&mut self.blur.temporal_accum_pipeline);
+        gpu.destroy_compute_pipeline(&mut self.blur.atrous_pipeline);
+        gpu.destroy_compute_pipeline(&mut self.fill_pipeline);
+        gpu.destroy_compute_pipeline(&mut self.main_pipeline);
+        gpu.destroy_render_pipeline(&mut self.post_proc_pipeline);
     }
 
     #[profiling::function]

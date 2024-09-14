@@ -117,8 +117,8 @@ impl Example {
             depth_stencil: None,
         });
 
-        let (indices_usize, vertex_values) =
-            del_msh::trimesh3_primitive::torus_yup(TORUS_RADIUS, 1.0, 100, 20);
+        let (indices, vertex_values) =
+            del_msh_core::trimesh3_primitive::torus_yup::<u16, f32>(TORUS_RADIUS, 1.0, 100, 20);
         let vertex_buf = context.create_buffer(gpu::BufferDesc {
             name: "vertices",
             size: (vertex_values.len() * mem::size_of::<f32>()) as u64,
@@ -132,10 +132,6 @@ impl Example {
             )
         };
 
-        let indices = indices_usize
-            .into_iter()
-            .map(|i| i as u16)
-            .collect::<Vec<_>>();
         let index_buf = context.create_buffer(gpu::BufferDesc {
             name: "indices",
             size: (indices.len() * mem::size_of::<u16>()) as u64,
@@ -254,12 +250,15 @@ impl Example {
         if let Some(sp) = self.prev_sync_point {
             self.context.wait_for(&sp, !0);
         }
-        self.context
-            .destroy_command_encoder(&mut self.command_encoder);
         self.context.destroy_texture_view(self.target_view);
         self.context.destroy_texture(self.target);
         self.context.destroy_acceleration_structure(self.blas);
         self.context.destroy_acceleration_structure(self.tlas);
+        self.context
+            .destroy_command_encoder(&mut self.command_encoder);
+        self.context.destroy_compute_pipeline(&mut self.rt_pipeline);
+        self.context
+            .destroy_render_pipeline(&mut self.draw_pipeline);
     }
 
     fn render(&mut self) {
